@@ -1,0 +1,234 @@
+package model
+
+import (
+	"fmt"
+	"net"
+	//	"os"
+
+	//	"strings"
+	"encoding/binary"
+	//	"encoding/json"
+	"reflect"
+
+	"github.com/log"
+)
+
+var (
+  	UDPReadMsgChan chan []byte = make(chan []byte, 1) // 管道传输udp server读取的消息
+)
+
+type UdpObject struct {
+	IP         string
+	Port       string
+	HandleConn func(*net.UDPConn)
+}
+
+func (this *UdpObject) StartUDPListen() {
+	udpaddr, err := net.ResolveUDPAddr("udp4", this.IP+":"+this.Port)
+	if nil != err {
+		log.Error("pkg: model, func: StartListen, method: net.Listen, errInfo:", err)
+		return
+	}
+	for {
+		conn, err2 := net.ListenUDP("udp", udpaddr)
+		if nil != err2 {
+			log.Error("pkg: model, func: StartListen, method: net.Listen, errInfo:", err2)
+			return
+		}
+		fmt.Println("udp listening " + this.IP + ":" + this.Port + "..")
+		//Start a new goroutine to handle the new connection
+		this.HandleConn(conn)
+	}
+
+}
+
+func StartUdpServer(ip string) {
+	udpObj := new(UdpObject)
+	udpObj.IP = ip
+	udpObj.Port = "12501"
+	udpObj.HandleConn = HandleUdpConn
+	udpObj.StartUDPListen()
+}
+
+func HandleUdpConn(conn *net.UDPConn) {
+	defer conn.Close()
+	var buf []byte = make([]byte, 4096*2)
+	fmt.Println("waiting read from udp")
+	for {
+		_, _, err := conn.ReadFromUDP(buf[0:])
+		if nil != err {
+			fmt.Println("err", err)
+			return
+		}
+		fmt.Println("read from udp:", buf)
+
+		UDPReadMsgChan <- buf
+	}
+
+}
+
+func UdpClient(ipPort string, msg ...interface{}) {
+	conn, err := net.Dial("udp", ipPort) // ip带配置
+	defer conn.Close()
+	if err != nil {
+		return
+	}
+
+	var msgBuf []byte
+	fmt.Println("udp send msg ->", msg)
+	for _, v := range msg {
+		msgBuf = append(msgBuf, BigEndianMarshal(v)...)
+	}
+
+	_, err = conn.Write(msgBuf[0:])
+	if nil != err {
+		log.Error("pkg: service, file: grasperUEData.go, func: GrasperUEDataOfUP6, method: json.Unmarshal, errInfo:", err)
+		return
+	}
+	fmt.Println("udp msg sent done")
+}
+
+func BigEndianMarshal(v interface{}) []byte {
+	var msgBuf []byte
+	var buf []byte
+
+	obj := reflect.ValueOf(v) //传内容，非指针,只读
+
+	for i := 0; i < obj.NumField(); i++ {
+		field := obj.Field(i)
+
+		switch field.Type() {
+		case reflect.TypeOf(uint16(1)):
+			buf = make([]byte, 2)
+			//			binary.LittleEndian.PutUint16(buf, field.Interface().(uint16))
+			binary.BigEndian.PutUint16(buf, field.Interface().(uint16))
+			msgBuf = append(msgBuf, buf...)
+		case reflect.TypeOf(uint32(1)):
+			buf = make([]byte, 4)
+			//			binary.LittleEndian.PutUint32(buf, field.Interface().(uint32))
+			binary.BigEndian.PutUint32(buf, field.Interface().(uint32))
+			msgBuf = append(msgBuf, buf...)
+		default:
+			for j := 0; j < field.NumField(); j++ { //遍历字段结构体
+				fieldfield := field.Field(j)
+
+				switch fieldfield.Type() {
+				case reflect.TypeOf(uint16(1)):
+					buf = make([]byte, 2)
+					//			binary.LittleEndian.PutUint16(buf, field.Interface().(uint16))
+					binary.BigEndian.PutUint16(buf, fieldfield.Interface().(uint16))
+					msgBuf = append(msgBuf, buf...)
+				case reflect.TypeOf(uint32(1)):
+					buf = make([]byte, 4)
+					//			binary.LittleEndian.PutUint32(buf, field.Interface().(uint32))
+					binary.BigEndian.PutUint32(buf, fieldfield.Interface().(uint32))
+					msgBuf = append(msgBuf, buf...)
+				}
+			}
+
+		}
+
+	}
+
+	return msgBuf
+}
+
+func BigEndianUnMarshal(msg []byte, v interface{}) (T_UDPHeader, T_DACHeader, interface{}) {
+
+	var udpHeader T_UDPHeader //8字节
+	var dacHeader T_DACHeader //8字节
+	if len(msg) < 16 {
+		log.Error("pkg model file udp.go func BigEndianUnMarshal,err :", "udp 返回内容头部不完整")
+		return udpHeader, dacHeader, nil
+	}
+	udpHeader.SrcPort = binary.BigEndian.Uint16(msg[0:2])
+	udpHeader.DstPort = binary.BigEndian.Uint16(msg[2:4])
+	udpHeader.UdpLenth = binary.BigEndian.Uint16(msg[4:6])
+	udpHeader.UdpChk = binary.BigEndian.Uint16(msg[6:8])
+
+	dacHeader.UeId = binary.BigEndian.Uint32(msg[8:12])
+	dacHeader.MsgType = binary.BigEndian.Uint32(msg[12:16])
+
+	ref := reflect.ValueOf(v).Elem() // 指针，修改字段
+	index := 16
+	for i := 0; i < ref.NumField(); i++ {
+		field := ref.Field(i)
+		switch field.Type() {
+		case reflect.TypeOf(uint16(1)):
+			if len(msg) < index+2 {
+				log.Error("pkg model file udp.go func BigEndianUnMarshal,err :", "udp 返回内容不完整")
+				return udpHeader, dacHeader, nil
+			}
+			field.SetUint(uint64(binary.BigEndian.Uint16(msg[index : index+2])))
+			index += 2
+		case reflect.TypeOf(uint32(1)):
+			if len(msg) < index+4 {
+				log.Error("pkg model file udp.go func BigEndianUnMarshal,err :", "udp 返回内容不完整")
+				return udpHeader, dacHeader, nil
+			}
+			field.SetUint(uint64(binary.BigEndian.Uint32(msg[index : index+4])))
+			index += 4
+		case reflect.TypeOf([]T_DACExpDataInfo{  // 特殊case
+			T_DACExpDataInfo{ExpType: 1 /*导数类型*/, ExpNum: 1 /* 导数的slot数量*/, ExpNumLen: 1 /* 每个slot的数据长度 */},
+		}):
+			l := len(msg[index:])
+			n := l / 12
+			v.(*T_DACStartCatchAck).ExpDataInfo = make([]T_DACExpDataInfo, n)
+			for k := 0; k < n; k++ {
+				v.(*T_DACStartCatchAck).ExpDataInfo[k].ExpType = binary.BigEndian.Uint32(msg[index : index+4])
+				index += 4
+				v.(*T_DACStartCatchAck).ExpDataInfo[k].ExpNum = binary.BigEndian.Uint32(msg[index : index+4])
+				index += 4
+				v.(*T_DACStartCatchAck).ExpDataInfo[k].ExpNumLen = binary.BigEndian.Uint32(msg[index : index+4])
+				index += 4
+			}
+		case reflect.TypeOf([]byte{}):
+			v.(*T_DACExpAck).Data = msg[index : v.(*T_DACExpAck).SilceLen+uint32(index)]
+			return udpHeader, dacHeader, v
+
+		default:
+			for j := 0; j < field.NumField(); j++ { //遍历子成员结构体
+				fieldfield := field.Field(j)
+				switch fieldfield.Type() {
+				case reflect.TypeOf(uint16(1)):
+					if len(msg) < index+2 {
+						log.Error("pkg model file udp.go func BigEndianUnMarshal,err :", "udp 返回内容不完整")
+						return udpHeader, dacHeader, nil
+					}
+					fieldfield.SetUint(uint64(binary.BigEndian.Uint16(msg[index : index+2])))
+					index += 2
+				case reflect.TypeOf(uint32(1)):
+					if len(msg) < index+4 {
+						log.Error("pkg model file udp.go func BigEndianUnMarshal,err :", "udp 返回内容不完整")
+						return udpHeader, dacHeader, nil
+					}
+					fieldfield.SetUint(uint64(binary.BigEndian.Uint32(msg[index : index+4])))
+					index += 4
+
+				}
+			}
+		}
+	}
+
+	fmt.Println("udp recive msg :", udpHeader, dacHeader, v)
+	return udpHeader, dacHeader, v
+
+}
+
+type T_UDPHeader struct {
+	SrcPort  uint16 /* 源端口 */
+	DstPort  uint16 /* 目的端口 */
+	UdpLenth uint16 /* Udp包的长度, 含UDP首部和UDP数据的字节长度*/
+	UdpChk   uint16 /* Udp校验和*/
+}
+
+type T_DACHeader struct {
+	UeId    uint32
+	MsgType uint32
+}
+
+type T_DACExpDataInfo struct {
+	ExpType   uint32
+	ExpNum    uint32
+	ExpNumLen uint32 
+} 
